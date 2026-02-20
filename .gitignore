@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Static Media & Metadata (Private data)
+static/captures/**/*
+!static/captures/.gitkeep
+static/thumbnails/**/*
+!static/thumbnails/.gitkeep
+static/metadata/**/*
+!static/metadata/.gitkeep
+
+# Ensure the directories themselves are not ignored, just their contents
+!static/captures/
+!static/thumbnails/
+!static/metadata/
+!static/css/
+
+# System
+.DS_Store
+*.swp
+.owlsight_lock

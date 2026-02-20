@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+
+{% block title %}Session {{ session_id }} - PiSentry{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-column flex-md-row justify-content-between align-items-center mb-4 gap-3">
+    <div>
+        <h2 class="fw-bold mb-1"><i class="fas fa-history me-2 text-info"></i>Session: {{ session_id }}</h2>
+        <div class="d-flex gap-2 mt-1">
+            <span class="badge bg-light text-muted border">{{ images|length }} frames</span>
+            {% if video_exists %}<span class="badge bg-success">MP4 READY</span>{% endif %}
+            {% if gif_exists %}<span class="badge bg-info text-white">GIF READY</span>{% endif %}
+        </div>
+    </div>
+    
+    <div class="d-flex gap-2 flex-wrap justify-content-end">
+        <a href="/gallery/timelapses" class="btn btn-light rounded-pill px-3 shadow-sm">
+            <i class="fas fa-arrow-left me-1"></i> Back
+        </a>
+        <div class="btn-group shadow-sm rounded-pill overflow-hidden">
+            <button id="compileBtn" class="btn btn-success border-0 px-3" {% if not images or video_exists %}disabled{% endif %}>
+                <i class="fas fa-video me-1"></i> Compile MP4
+            </button>
+            <button id="compileGifBtn" class="btn btn-info text-white border-0 px-3" {% if not images or gif_exists %}disabled{% endif %}>
+                <i class="fas fa-film me-1"></i> GIF
+            </button>
+        </div>
+        <button id="deleteBtn" class="btn btn-light text-danger rounded-pill px-3 shadow-sm border">
+            <i class="fas fa-trash-alt"></i>
+        </button>
+    </div>
+</div>
+
+<div id="alertContainer"></div>
+
+<!-- Compilation Status / Downloads -->
+<div class="row g-4 mb-5">
+    {% if video_exists %}
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm bg-white rounded-lg h-100">
+            <div class="card-body d-flex align-items-center justify-content-between p-4">
+                <div>
+                    <h5 class="fw-bold text-success mb-1">MP4 Video Available</h5>
+                    <p class="text-muted small mb-0">High-quality compiled timelapse video</p>
+                </div>
+                <div class="d-flex gap-2">
+                    <a href="/static/captures/{{ session_id }}.mp4" class="btn btn-sm btn-outline-success rounded-pill" target="_blank">Play</a>
+                    <a href="/static/captures/{{ session_id }}.mp4" class="btn btn-sm btn-success rounded-pill" download>Download</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if gif_exists %}
+    <div class="col-md-6">
+        <div class="card border-0 shadow-sm bg-white rounded-lg h-100">
+            <div class="card-body d-flex align-items-center justify-content-between p-4">
+                <div>
+                    <h5 class="fw-bold text-info mb-1">GIF Animation Available</h5>
+                    <p class="text-muted small mb-0">Compressed animated preview</p>
+                </div>
+                <div class="d-flex gap-2">
+                    <a href="/static/captures/{{ session_id }}.gif" class="btn btn-sm btn-outline-info rounded-pill" target="_blank">View</a>
+                    <a href="/static/captures/{{ session_id }}.gif" class="btn btn-sm btn-info text-white rounded-pill" download>Download</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Frame Gallery -->
+<div class="card border-0 shadow-sm bg-white rounded-lg">
+    <div class="card-header bg-white py-3 border-bottom border-light">
+        <h5 class="fw-bold mb-0">Captured Frames</h5>
+    </div>
+    <div class="card-body p-4">
+        <div class="row g-2">
+            {% for img in images %}
+            <div class="col-4 col-sm-3 col-md-2">
+                <div class="ratio ratio-1x1 rounded overflow-hidden bg-light shadow-sm">
+                    <img src="/thumbnail/timelapses/{{ session_id }}/{{ img }}" 
+                         class="object-fit-cover w-100 h-100" 
+                         loading="lazy" 
+                         alt="{{ img }}"
+                         style="cursor: zoom-in;"
+                         onclick="window.open('/static/captures/timelapses/{{ session_id }}/{{ img }}')">
+                </div>
+            </div>
+            {% else %}
+            <div class="col-12 text-center py-5 text-muted">
+                <i class="fas fa-images fa-3x opacity-25 mb-3"></i>
+                <p>No frames found in this session.</p>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const sessionId = "{{ session_id }}";
+    const compileBtn = document.getElementById('compileBtn');
+    const compileGifBtn = document.getElementById('compileGifBtn');
+    let pollingInterval = null;
+
+    function showAlert(message, type = 'info') {
+        const container = document.getElementById('alertContainer');
+        container.innerHTML = `<div class="alert alert-${type} alert-dismissible fade show rounded-lg border-0 shadow-sm">
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>`;
+    }
+
+    async function checkStatus() {
+        try {
+            const response = await fetch(`/timelapse/compile_status/${sessionId}`);
+            const result = await response.json();
+            
+            if (result.status === 'running') {
+                const btn = result.format === 'gif' ? compileGifBtn : compileBtn;
+                if(btn) {
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Compiling...';
+                }
+                if (!pollingInterval) pollingInterval = setInterval(checkStatus, 3000);
+            } else if (result.status === 'success') {
+                if (pollingInterval) {
+                    clearInterval(pollingInterval);
+                    pollingInterval = null;
+                    showAlert('Compilation finished! Reloading...', 'success');
+                    setTimeout(() => window.location.reload(), 1500);
+                }
+            } else if (result.status === 'error') {
+                if (pollingInterval) {
+                    clearInterval(pollingInterval);
+                    pollingInterval = null;
+                    showAlert('Error: ' + result.message, 'danger');
+                    resetButtons();
+                }
+            }
+        } catch (e) {
+            console.error('Status check failed', e);
+        }
+    }
+
+    function resetButtons() {
+        compileBtn.disabled = false;
+        compileBtn.innerHTML = '<i class="fas fa-video me-1"></i> Compile MP4';
+        compileGifBtn.disabled = false;
+        compileGifBtn.innerHTML = '<i class="fas fa-film me-1"></i> GIF';
+    }
+
+    async function startCompile(format = 'mp4') {
+        const btn = format === 'gif' ? compileGifBtn : compileBtn;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Starting...';
+        
+        try {
+            const response = await fetch(`/timelapse/compile/${sessionId}`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ format })
+            });
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                showAlert('Compilation started in background. Please wait...', 'info');
+                checkStatus();
+            } else {
+                showAlert('Error: ' + result.message, 'danger');
+                resetButtons();
+            }
+        } catch (e) {
+            showAlert('Error: ' + e.message, 'danger');
+            resetButtons();
+        }
+    }
+
+    if(compileBtn) compileBtn.onclick = () => startCompile('mp4');
+    if(compileGifBtn) compileGifBtn.onclick = () => startCompile('gif');
+
+    document.getElementById('deleteBtn').onclick = async function() {
+        if (!confirm('Are you sure you want to delete this entire session?')) return;
+        try {
+            const response = await fetch(`/timelapse/delete/${sessionId}`, { method: 'POST' });
+            if (response.ok) window.location.href = '/gallery/timelapses';
+            else showAlert('Error deleting session', 'danger');
+        } catch (e) { showAlert('Error: ' + e.message, 'danger'); }
+    };
+
+    checkStatus();
+</script>
+{% endblock %}

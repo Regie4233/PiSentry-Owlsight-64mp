@@ -1,0 +1,593 @@
+{% extends "base.html" %}
+
+{% block title %}PiSentry - Pro Control{% endblock %}
+
+{% block content %}
+<!-- Hero Section: Always Visible Live Feed -->
+<section class="hero-viewfinder">
+    <div class="viewfinder-overlay-top">
+        <div id="statusBadge" class="status-indicator live">
+            <span class="pulse-dot bg-primary"></span>
+            <span id="statusLabel">Live Feed</span>
+        </div>
+        
+        <div class="d-flex gap-2">
+            <div id="storageIndicator" class="status-indicator">
+                <i class="fas fa-hdd me-2"></i>
+                <span id="storageText">-- GB</span>
+            </div>
+            <button class="status-indicator bg-white border-0" onclick="toggleFullScreen()">
+                <i class="fas fa-expand"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Live Stream -->
+    <img id="stream" src="/video_feed" alt="Live Stream Viewfinder">
+    
+    <!-- Grid Overlay -->
+    <div id="gridOverlay" class="grid-overlay d-none">
+        <div class="grid-line horizontal" style="top: 33.33%;"></div>
+        <div class="grid-line horizontal" style="top: 66.66%;"></div>
+        <div class="grid-line vertical" style="left: 33.33%;"></div>
+        <div class="grid-line vertical" style="left: 66.66%;"></div>
+    </div>
+
+    <!-- Active Mode Message -->
+    <div id="streamBusyOverlay" class="position-absolute inset-0 bg-white bg-opacity-75 d-none d-flex flex-column align-items-center justify-content-center text-center p-4">
+        <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status"></div>
+        <h3 class="fw-bold text-dark" id="busyOverlayTitle">Task in Progress</h3>
+        <p class="text-secondary max-w-sm" id="busyOverlayMsg">The live feed is currently processing high-priority capture data.</p>
+    </div>
+</section>
+
+<!-- Controls Dashboard -->
+<div class="container-fluid px-0">
+    <div class="row g-4">
+        <!-- Manual Capture Card -->
+        <div class="col-xl-4 col-lg-6">
+            <div class="card feature-card">
+                <div class="card-body">
+                    <h5 class="card-title-ui"><i class="fas fa-camera"></i> Manual Capture</h5>
+                    
+                    <div class="mb-3">
+                        <label class="form-label-ui">Capture Resolution</label>
+                        <select id="resolution" class="form-select-ui">
+                            {% for res in resolutions %}
+                            <option value='{{ res | tojson }}' {% if res == default_res %}selected{% endif %}>{{ res.label }}</option>
+                            {% endfor %}
+                        </select>
+                        <small class="text-muted mt-1 d-block">Resolution for Snapshots and Videos.</small>
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="form-label-ui">Live Feed Resolution</label>
+                        <select id="stream_res" class="form-select-ui">
+                            {% for sres in stream_resolutions %}
+                            <option value='{{ sres | tojson }}' {% if sres.width == settings.stream_width and sres.fps == settings.stream_framerate %}selected{% endif %}>{{ sres.label }}</option>
+                            {% endfor %}
+                        </select>
+                        <small class="text-muted mt-1 d-block">Affects preview quality and frame rate.</small>
+                    </div>
+
+                    <div class="row g-2 mb-4">
+                        <div class="col-6">
+                            <button id="snapBtn" class="btn btn-ui btn-ui-primary w-100">
+                                <i class="fas fa-camera me-2"></i> Snap
+                            </button>
+                        </div>
+                        <div class="col-6">
+                            <button id="recordBtn" class="btn btn-ui btn-ui-danger w-100">
+                                <i class="fas fa-video me-2"></i> Record
+                            </button>
+                        </div>
+                    </div>
+
+                    <hr class="my-4 opacity-5">
+
+                    <h6 class="form-label-ui mb-3">Live Adjustments</h6>
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between mb-1">
+                            <label class="small fw-bold">Focus Mode</label>
+                            <span class="badge bg-light text-primary" id="focusStatus">AF-C</span>
+                        </div>
+                        <select id="focusMode" class="form-select-ui py-1">
+                            <option value="continuous">Continuous (AF-C)</option>
+                            <option value="auto">Single (AF-S)</option>
+                            <option value="manual">Manual Focus</option>
+                        </select>
+                    </div>
+                    
+                    <div id="manualFocusDiv" class="mb-3 d-none">
+                        <label class="small fw-bold mb-1">Lens Position: <span id="lensVal">0.0</span></label>
+                        <div class="d-flex align-items-center gap-2">
+                            <button class="btn btn-light btn-sm px-2" onclick="adjustLens(-0.5)">-</button>
+                            <input type="range" class="form-range flex-grow-1" id="lensRange" min="0" max="15" step="0.1" value="0">
+                            <button class="btn btn-light btn-sm px-2" onclick="adjustLens(0.5)">+</button>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="small fw-bold mb-1">Digital Zoom: <span id="zoomVal">1.0x</span></label>
+                        <input type="range" class="form-range" id="zoomRange" min="1" max="10" step="0.1" value="1">
+                    </div>
+
+                    <button id="applySettingsBtn" class="btn btn-ui btn-ui-outline w-100 mt-2">
+                        Apply Settings
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Timelapse Card -->
+        <div class="col-xl-4 col-lg-6">
+            <div class="card feature-card">
+                <div class="card-body">
+                    <h5 class="card-title-ui"><i class="fas fa-history"></i> Time-lapse</h5>
+                    
+                    <div class="row g-3 mb-4">
+                        <div class="col-6">
+                            <label class="form-label-ui">Interval (s)</label>
+                            <input type="number" id="tl_interval" class="form-control-ui" value="5">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label-ui">Duration (s)</label>
+                            <input type="number" id="tl_duration" class="form-control-ui" value="300">
+                        </div>
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="form-label-ui">Resolution</label>
+                        <select id="tl_res" class="form-select-ui">
+                            {% for res in resolutions %}
+                            <option value='{{ res | tojson }}'>{{ res.label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button id="tlStartBtn" class="btn btn-ui btn-ui-primary">
+                            <i class="fas fa-play me-2"></i> Start Timelapse
+                        </button>
+                        <button id="tlStopBtn" class="btn btn-ui btn-ui-outline" disabled>
+                            <i class="fas fa-stop me-2"></i> Stop Current
+                        </button>
+                    </div>
+
+                    <div id="tlInfoBox" class="mt-4 p-3 bg-light rounded d-none">
+                        <div class="d-flex align-items-center gap-3">
+                            <div class="spinner-grow spinner-grow-sm text-warning" role="status"></div>
+                            <div class="flex-grow-1">
+                                <small class="text-muted d-block">Current Progress</small>
+                                <span class="fw-bold" id="tlCount">0 images</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scheduler Card -->
+        <div class="col-xl-4 col-12">
+            <div class="card feature-card">
+                <div class="card-body">
+                    <h5 class="card-title-ui"><i class="fas fa-calendar-alt"></i> Unified Scheduler</h5>
+                    
+                    <ul class="nav nav-pills nav-fill bg-light p-1 rounded-pill mb-4" id="schedTabs">
+                        <li class="nav-item">
+                            <button class="nav-link active rounded-pill py-1 px-3 small" data-bs-toggle="tab" data-bs-target="#tab-sched-rec">Recording</button>
+                        </li>
+                        <li class="nav-item">
+                            <button class="nav-link rounded-pill py-1 px-3 small" data-bs-toggle="tab" data-bs-target="#tab-sched-tl">Timelapse</button>
+                        </li>
+                    </ul>
+
+                    <div class="tab-content">
+                        <!-- Sched Rec -->
+                        <div class="tab-pane fade show active" id="tab-sched-rec">
+                            <div class="row g-2 mb-3">
+                                <div class="col-6">
+                                    <label class="form-label-ui">Start Date/Time</label>
+                                    <input type="datetime-local" id="sched_rec_start" class="form-control-ui">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label-ui">End Date/Time</label>
+                                    <input type="datetime-local" id="sched_rec_end" class="form-control-ui">
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label-ui">Recording Resolution</label>
+                                    <select id="sched_rec_res" class="form-select-ui">
+                                        {% for res in resolutions %}
+                                        <option value='{{ res | tojson }}'>{{ res.label }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                            </div>
+                            <button id="addSchedRecBtn" class="btn btn-ui btn-ui-primary btn-sm w-100 mb-4">Add Scheduled Record</button>
+                        </div>
+                        <!-- Sched TL -->
+                        <div class="tab-pane fade" id="tab-sched-tl">
+                            <div class="row g-2 mb-3">
+                                <div class="col-6">
+                                    <label class="form-label-ui">Start Date/Time</label>
+                                    <input type="datetime-local" id="tl_sched_start" class="form-control-ui">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label-ui">End Date/Time</label>
+                                    <input type="datetime-local" id="tl_sched_end" class="form-control-ui">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label-ui">Interval (s)</label>
+                                    <input type="number" id="tl_sched_interval" class="form-control-ui" value="30">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label-ui">Resolution</label>
+                                    <select id="tl_sched_res" class="form-select-ui">
+                                        {% for res in resolutions %}
+                                        <option value='{{ res | tojson }}'>{{ res.label }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                            </div>
+                            <button id="addSchedTlBtn" class="btn btn-ui btn-ui-primary btn-sm w-100 mb-4">Add Scheduled Timelapse</button>
+                        </div>
+                    </div>
+
+                    <div class="table-responsive" style="max-height: 250px;">
+                        <table class="table-ui" id="masterSchedTable">
+                            <thead>
+                                <tr>
+                                    <th>Type</th>
+                                    <th>Schedule</th>
+                                    <th>Status</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <!-- Rows dynamic -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast Container -->
+<div id="toast-container"></div>
+{% endblock %}
+
+{% block modals %}
+<!-- Advanced Settings Modal -->
+<div class="modal fade" id="settingsModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content border-0 shadow-lg rounded-lg">
+            <div class="modal-header bg-light border-0">
+                <h5 class="modal-title fw-bold">Camera Configuration</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-4">
+                <div class="mb-3">
+                    <label class="form-label-ui">Camera Rotation</label>
+                    <select id="rotation" class="form-select-ui">
+                        <option value="0" {% if settings.rotation == 0 %}selected{% endif %}>0° (Standard)</option>
+                        <option value="90" {% if settings.rotation == 90 %}selected{% endif %}>90° Clockwise</option>
+                        <option value="180" {% if settings.rotation == 180 %}selected{% endif %}>180° Inverted</option>
+                        <option value="270" {% if settings.rotation == 270 %}selected{% endif %}>270° Clockwise</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label-ui">AWB Mode</label>
+                    <select id="awb" class="form-select-ui">
+                        <option value="auto" {% if settings.awb == 'auto' %}selected{% endif %}>Auto</option>
+                        <option value="incandescent" {% if settings.awb == 'incandescent' %}selected{% endif %}>Incandescent</option>
+                        <option value="tungsten" {% if settings.awb == 'tungsten' %}selected{% endif %}>Tungsten</option>
+                        <option value="fluorescent" {% if settings.awb == 'fluorescent' %}selected{% endif %}>Fluorescent</option>
+                        <option value="indoor" {% if settings.awb == 'indoor' %}selected{% endif %}>Indoor</option>
+                        <option value="daylight" {% if settings.awb == 'daylight' %}selected{% endif %}>Daylight</option>
+                        <option value="cloudy" {% if settings.awb == 'cloudy' %}selected{% endif %}>Cloudy</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer bg-light border-0">
+                <button type="button" class="btn btn-light rounded-pill px-4" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary rounded-pill px-4" onclick="applyAdvancedSettings()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    async function applyAdvancedSettings() {
+        const rotation = document.getElementById('rotation').value;
+        const awb = document.getElementById('awb').value;
+        
+        await fetch('/settings/update', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                rotation: parseInt(rotation),
+                awb: awb
+            })
+        });
+        
+        const modal = bootstrap.Modal.getInstance(document.getElementById('settingsModal'));
+        modal.hide();
+        showToast("Advanced settings updated.");
+        // Rotation change requires stream restart, which is handled by app.py's generate_stream logic
+    }
+    window.applyAdvancedSettings = applyAdvancedSettings;
+
+    // State management
+    let isBusy = false;
+    let recording = false;
+    let knownImages = new Set();
+    const streamImg = document.getElementById('stream');
+    const toastContainer = document.getElementById('toast-container');
+
+    // UI Feedback: Toasts
+    function showToast(message, type = 'primary') {
+        const toastId = 'toast-' + Date.now();
+        const icon = type === 'danger' ? 'fa-exclamation-circle' : 'fa-info-circle';
+        const html = `
+            <div id="${toastId}" class="toast align-items-center text-white bg-${type === 'danger' ? 'danger' : 'primary'} border-0 shadow-lg mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="d-flex">
+                    <div class="toast-body d-flex align-items-center gap-2">
+                        <i class="fas ${icon}"></i> ${message}
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+            </div>
+        `;
+        toastContainer.insertAdjacentHTML('beforeend', html);
+        const toastEl = document.getElementById(toastId);
+        const bsToast = new bootstrap.Toast(toastEl, { autohide: true, delay: 3000 });
+        bsToast.show();
+        toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove());
+    }
+
+    // Safety: Feature Lock
+    function checkBusy() {
+        if (isBusy) {
+            showToast("Camera is busy. Please wait for current task to finish.", "danger");
+            return true;
+        }
+        return false;
+    }
+
+    async function updateCameraStatus() {
+        try {
+            const response = await fetch('/camera/status');
+            const data = await response.json();
+            
+            // Storage
+            const storage = data.storage;
+            document.getElementById('storageText').innerText = `${storage.used_gb} / ${storage.total_gb} GB`;
+            
+            // Mode Logic
+            const activeBusy = data.timelapse_active || data.recording_active;
+            const streamOverlay = document.getElementById('streamBusyOverlay');
+            const statusBadge = document.getElementById('statusBadge');
+            const statusLabel = document.getElementById('statusLabel');
+            const tlInfoBox = document.getElementById('tlInfoBox');
+
+            isBusy = activeBusy;
+
+            // Global UI Disable
+            document.querySelectorAll('.btn-ui').forEach(btn => {
+                // Keep Stop buttons enabled
+                if(btn.id === 'tlStopBtn' || btn.id === 'recordBtn') return;
+                btn.disabled = activeBusy;
+            });
+
+            if (activeBusy) {
+                streamOverlay.classList.remove('d-none');
+                statusBadge.classList.replace('live', 'busy');
+                
+                if (data.recording_active) {
+                    statusBadge.classList.replace('busy', 'rec');
+                    statusLabel.innerText = "RECORDING";
+                    document.getElementById('busyOverlayTitle').innerText = "Recording Active";
+                    document.getElementById('busyOverlayMsg').innerText = "High-quality video encoding in progress.";
+                    document.getElementById('recordBtn').classList.add('btn-ui-danger');
+                    recording = true;
+                } else if (data.timelapse_active) {
+                    statusLabel.innerText = "TIMELAPSE ACTIVE";
+                    document.getElementById('busyOverlayTitle').innerText = "Timelapse in Progress";
+                    document.getElementById('busyOverlayMsg').innerText = `Capturing frames (${data.timelapse_details.count} saved).`;
+                    tlInfoBox.classList.remove('d-none');
+                    document.getElementById('tlCount').innerText = `${data.timelapse_details.count} images`;
+                    document.getElementById('tlStopBtn').disabled = false;
+                }
+            } else {
+                streamOverlay.classList.add('d-none');
+                statusBadge.className = "status-indicator live";
+                statusLabel.innerText = "LIVE FEED";
+                tlInfoBox.classList.add('d-none');
+                document.getElementById('tlStopBtn').disabled = true;
+                
+                if (recording && !data.recording_active) {
+                    document.getElementById('recordBtn').classList.remove('btn-ui-danger');
+                    recording = false;
+                }
+            }
+        } catch (e) { console.error(e); }
+    }
+
+    // Capture Actions
+    document.getElementById('snapBtn').onclick = async () => {
+        if(checkBusy()) return;
+        showToast("Taking snapshot...", "primary");
+        const res = JSON.parse(document.getElementById('resolution').value);
+        const r = await fetch('/snap', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ resolution: res })
+        });
+        const d = await r.json();
+        if(d.status === 'success') showToast("Snapshot saved!");
+        else showToast(d.message, "danger");
+    };
+
+    document.getElementById('recordBtn').onclick = async function() {
+        if (!recording) {
+            if(checkBusy()) return;
+            showToast("Initializing recording...", "primary");
+            const res = JSON.parse(document.getElementById('resolution').value);
+            const r = await fetch('/record/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ resolution: res })
+            });
+            const d = await r.json();
+            if (d.status === 'success') {
+                recording = true;
+                this.classList.add('btn-ui-danger');
+            } else showToast(d.message, "danger");
+        } else {
+            showToast("Stopping recording...");
+            await fetch('/record/stop', {method:'POST'});
+            recording = false;
+            this.classList.remove('btn-ui-danger');
+        }
+    };
+
+    document.getElementById('tlStartBtn').onclick = async () => {
+        if(checkBusy()) return;
+        const res = JSON.parse(document.getElementById('tl_res').value);
+        const interval = document.getElementById('tl_interval').value;
+        const duration = document.getElementById('tl_duration').value;
+        await fetch('/timelapse/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ resolution: res, interval, duration })
+        });
+        showToast("Timelapse session started.");
+    };
+
+    document.getElementById('tlStopBtn').onclick = () => {
+        fetch('/timelapse/stop', {method:'POST'});
+        showToast("Stopping timelapse...");
+    };
+
+    // Scheduler Actions
+    async function updateSchedules() {
+        try {
+            const response = await fetch('/schedules');
+            const schedules = await response.json();
+            const tbody = document.querySelector('#masterSchedTable tbody');
+            tbody.innerHTML = '';
+
+            schedules.forEach(s => {
+                const typeIcon = s.type === 'recording' ? 'video' : 'history';
+                const statusClass = s.status === 'in progress' ? 'progress' : (s.status === 'completed' ? 'completed' : 'scheduled');
+                const row = `
+                    <tr>
+                        <td><i class="fas fa-${typeIcon} text-muted me-2"></i> ${s.type === 'recording' ? 'Video' : 'TL'}</td>
+                        <td class="small fw-bold">${s.start.split('T')[1]} <i class="fas fa-arrow-right mx-1 opacity-50"></i> ${s.end.split('T')[1]}</td>
+                        <td><span class="status-badge ${statusClass}">${s.status}</span></td>
+                        <td class="text-end">
+                            <button onclick="deleteSched('${s.id}')" class="btn btn-sm btn-light py-0"><i class="fas fa-times"></i></button>
+                        </td>
+                    </tr>
+                `;
+                tbody.innerHTML += row;
+            });
+        } catch (e) { console.error(e); }
+    }
+
+    document.getElementById('addSchedRecBtn').onclick = async () => {
+        const start = document.getElementById('sched_rec_start').value;
+        const end = document.getElementById('sched_rec_end').value;
+        const res = JSON.parse(document.getElementById('sched_rec_res').value);
+        if (!start || !end) return showToast("Select start/end times", "danger");
+        await fetch('/schedules/add', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ type: 'recording', start, end, resolution: res })
+        });
+        updateSchedules();
+        showToast("Recording scheduled.");
+    };
+
+    document.getElementById('addSchedTlBtn').onclick = async () => {
+        const start = document.getElementById('tl_sched_start').value;
+        const end = document.getElementById('tl_sched_end').value;
+        const interval = document.getElementById('tl_sched_interval').value;
+        const res = JSON.parse(document.getElementById('tl_sched_res').value);
+        if (!start || !end) return showToast("Select start/end times", "danger");
+        await fetch('/schedules/add', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ type: 'timelapse', start, end, interval, resolution: res })
+        });
+        updateSchedules();
+        showToast("Timelapse scheduled.");
+    };
+
+    window.deleteSched = async (id) => {
+        await fetch(`/schedules/delete/${id}`, { method: 'POST' });
+        updateSchedules();
+        showToast("Schedule removed.");
+    };
+
+    // Camera Adjustments
+    document.getElementById('applySettingsBtn').onclick = async function() {
+        const zoom = document.getElementById('zoomRange').value;
+        const focusMode = document.getElementById('focusMode').value;
+        const lensPos = document.getElementById('lensRange').value;
+        const streamRes = JSON.parse(document.getElementById('stream_res').value);
+        
+        await fetch('/settings/update', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                zoom: zoom,
+                focus_mode: focusMode,
+                lens_position: lensPos,
+                stream_width: streamRes.width,
+                stream_height: streamRes.height,
+                stream_framerate: streamRes.fps
+            })
+        });
+        showToast("Camera settings updated.");
+    };
+
+    // UI Helpers
+    document.getElementById('zoomRange').oninput = function() {
+        document.getElementById('zoomVal').innerText = parseFloat(this.value).toFixed(1) + 'x';
+    };
+    document.getElementById('lensRange').oninput = function() {
+        document.getElementById('lensVal').innerText = parseFloat(this.value).toFixed(1);
+    };
+    document.getElementById('focusMode').onchange = function() {
+        const manualDiv = document.getElementById('manualFocusDiv');
+        document.getElementById('focusStatus').innerText = this.options[this.selectedIndex].text.split(' ')[0];
+        if (this.value === 'manual') manualDiv.classList.remove('d-none');
+        else manualDiv.classList.add('d-none');
+    };
+
+    function adjustLens(delta) {
+        const range = document.getElementById('lensRange');
+        let val = parseFloat(range.value) + delta;
+        val = Math.max(0, Math.min(15, val));
+        range.value = val;
+        document.getElementById('lensVal').innerText = val.toFixed(1);
+    }
+
+    function toggleFullScreen() {
+        const elem = document.getElementById('stream');
+        if (elem.requestFullscreen) elem.requestFullscreen();
+        else if (elem.webkitRequestFullscreen) elem.webkitRequestFullscreen();
+    }
+
+    // Init
+    setInterval(updateCameraStatus, 2000);
+    setInterval(updateSchedules, 5000);
+    updateSchedules();
+    updateCameraStatus();
+</script>
+{% endblock %}

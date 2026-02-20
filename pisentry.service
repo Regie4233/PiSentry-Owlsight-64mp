@@ -1,0 +1,16 @@
+[Unit]
+Description=PiSentry Camera UI
+After=network.target
+
+[Service]
+# Replace 'egs' with your actual Linux username
+User=egs
+# Replace '/home/egs/PiSentry' with the actual absolute path to this folder
+WorkingDirectory=/home/egs/PiSentry
+ExecStart=/bin/bash /home/egs/PiSentry/launch.sh
+Restart=always
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

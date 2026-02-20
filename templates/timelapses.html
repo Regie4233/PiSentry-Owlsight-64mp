@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Timelapses - PiSentry{% endblock %}
+
+{% block content %}
+<div class="row align-items-center mb-4">
+    <div class="col-md-8">
+        <h2 class="fw-bold mb-1"><i class="fas fa-history me-2 text-warning"></i>Timelapse Gallery</h2>
+        <p class="text-muted">Explore and manage your high-resolution timelapse sessions.</p>
+    </div>
+</div>
+
+<div class="row g-4">
+    {% for session in sessions %}
+    <div class="col-12 col-md-6 col-lg-4 col-xl-3">
+        <div class="card border-0 shadow-sm h-100 rounded-lg overflow-hidden">
+            <div class="ratio ratio-4x3 bg-light">
+                {% if session.preview %}
+                <img src="/thumbnail/timelapses/{{ session.path }}/{{ session.preview }}" class="object-fit-cover w-100 h-100" alt="Preview">
+                {% else %}
+                <div class="d-flex align-items-center justify-content-center h-100 text-muted">
+                    <i class="fas fa-image fa-3x opacity-25"></i>
+                </div>
+                {% endif %}
+                <div class="position-absolute bottom-0 start-0 w-100 p-2 bg-gradient-to-t from-black to-transparent">
+                    <span class="badge bg-warning text-dark">{{ session.count }} frames</span>
+                </div>
+            </div>
+            <div class="card-body p-3 d-flex flex-column justify-content-between">
+                <div class="mb-3 text-truncate">
+                    <h6 class="fw-bold text-dark mb-1">{{ session.id }}</h6>
+                    {% if session.meta %}
+                    <div class="mb-2">
+                        <span class="badge bg-light text-muted border" style="font-size: 0.65rem;">{{ session.meta.resolution }}</span>
+                    </div>
+                    {% endif %}
+                    <small class="text-muted">Created: {{ session.id[0:10].replace('_', ' ') }}</small>
+                </div>
+                <div class="d-flex justify-content-between mt-auto">
+                    <a href="/gallery/timelapses/{{ session.id }}" class="btn btn-sm btn-primary">
+                        <i class="fas fa-eye me-1"></i> View Images
+                    </a>
+                    <button class="btn btn-sm btn-light text-danger" onclick="deleteSession('{{ session.id }}')">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-12 text-center py-5">
+        <div class="p-5 bg-white rounded-lg shadow-sm d-inline-block">
+            <i class="fas fa-hourglass-half fa-4x text-light mb-3"></i>
+            <h5 class="fw-bold">No timelapses created</h5>
+            <p class="text-muted">Start a timelapse session from the dashboard.</p>
+            <a href="/" class="btn btn-primary rounded-pill px-4">Go to Dashboard</a>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    async function deleteSession(id) {
+        if (!confirm('Permanently delete this entire timelapse session and its files?')) return;
+        try {
+            const res = await fetch(`/timelapse/delete/${id}`, { method: 'POST' });
+            if (res.ok) location.reload();
+            else alert('Error deleting session');
+        } catch (e) { alert('Error communicating with server'); }
+    }
+</script>
+{% endblock %}
