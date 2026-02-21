@@ -8,6 +8,14 @@ import random
 import string
 import shutil
 from datetime import datetime
+import cv2
+import numpy as np
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
+import requests
+import json
 
 app = Flask(__name__)
 
@@ -18,6 +26,133 @@ META_DIR = 'static/metadata'
 os.makedirs(CAPTURE_DIR, exist_ok=True)
 os.makedirs(THUMB_DIR, exist_ok=True)
 os.makedirs(META_DIR, exist_ok=True)
+
+# Motion Detection Configuration
+MOTION_CONFIG_FILE = os.path.join(META_DIR, 'motion_config.json')
+CAMERA_CONFIG_FILE = os.path.join(META_DIR, 'camera_config.json')
+
+motion_config = {
+    "active": False,
+    # Sensitivity Settings
+    "sensitivity_level": "medium", # low, medium, high
+    "sensitivity_val": 25, # Derived from level (pixel diff)
+    "threshold_val": 500, # Derived from level (pixel count)
+    "grid_mask": [], 
+    "grid_rows": 12,
+    "grid_cols": 12,
+    "event_buffer": 0, # Debounce seconds
+    "event_type": "snap", # snap, record, timelapse
+    
+    # Trigger Configurations
+    "triggers": {
+        "snap": {
+            "enabled": False,
+            "resolution": {"width": 1920, "height": 1080, "label": "1080p Full HD"},
+            "cooldown": 5
+        },
+        "record": {
+            "enabled": False,
+            "resolution": {"width": 1920, "height": 1080, "label": "1080p Full HD"},
+            "duration": 10,
+            "cooldown": 10
+        },
+        "timelapse": {
+            "enabled": False,
+            "resolution": {"width": 1920, "height": 1080, "label": "1080p Full HD"},
+            "interval": 5,
+            "duration": 600, # 10 minutes default
+            "cooldown": 30
+        }
+    },
+    
+    # Notifications
+    "notifications": {
+        "email_enabled": False,
+        "email_to": "",
+        "webhook_enabled": False,
+        "webhook_url": ""
+    },
+    "email_settings": {
+        "smtp_server": "smtp.gmail.com",
+        "smtp_port": 587,
+        "smtp_user": "",
+        "smtp_pass": "" 
+    }
+}
+
+def save_motion_config():
+    """Saves the motion detection configuration to disk."""
+    try:
+        with open(MOTION_CONFIG_FILE, 'w') as f:
+            json.dump(motion_config, f, indent=4)
+        print(f"Motion configuration saved to {MOTION_CONFIG_FILE}")
+    except Exception as e:
+        print(f"Error saving motion config: {e}")
+
+def load_motion_config():
+    """Loads the motion detection configuration from disk if available."""
+    global motion_config
+    if os.path.exists(MOTION_CONFIG_FILE):
+        try:
+            with open(MOTION_CONFIG_FILE, 'r') as f:
+                loaded_config = json.load(f)
+                # Deep merge or just replace? Let's use update to keep structure
+                motion_config.update(loaded_config)
+            print(f"Motion configuration loaded from {MOTION_CONFIG_FILE}")
+        except Exception as e:
+            print(f"Error loading motion config: {e}")
+
+def save_camera_settings():
+    """Saves the camera settings to disk."""
+    try:
+        with open(CAMERA_CONFIG_FILE, 'w') as f:
+            json.dump(camera_settings, f, indent=4)
+        print(f"Camera settings saved to {CAMERA_CONFIG_FILE}")
+    except Exception as e:
+        print(f"Error saving camera settings: {e}")
+
+def load_camera_settings():
+    """Loads the camera settings from disk if available."""
+    global camera_settings
+    if os.path.exists(CAMERA_CONFIG_FILE):
+        try:
+            with open(CAMERA_CONFIG_FILE, 'r') as f:
+                loaded_settings = json.load(f)
+                camera_settings.update(loaded_settings)
+            print(f"Camera settings loaded from {CAMERA_CONFIG_FILE}")
+        except Exception as e:
+            print(f"Error loading camera settings: {e}")
+
+# Load initial config from disk
+# Moved to later section after update_motion_mask is defined
+
+motion_state = {
+    "last_check": 0,
+    "is_processing": False,
+    "previous_frame": None,
+    "mask_image": None,
+    "width": 320, 
+    "height": 240,
+    # Cooldown tracking
+    "last_snap": 0,
+    "last_record": 0,
+    "last_timelapse": 0,
+    "last_notification": 0
+}
+
+SURVEILLANCE_MODE = False
+
+@app.route('/surveillance/toggle', methods=['POST'])
+def toggle_surveillance():
+    global SURVEILLANCE_MODE
+    data = request.json
+    target_mode = data.get('active', False)
+    
+    if SURVEILLANCE_MODE != target_mode:
+        SURVEILLANCE_MODE = target_mode
+        print(f"Surveillance Mode {'ENABLED' if SURVEILLANCE_MODE else 'DISABLED'}")
+        
+    return jsonify({"status": "success", "active": SURVEILLANCE_MODE})
 
 def save_metadata(filename, res, category="image"):
     """Saves capture-time metadata including camera settings."""
@@ -112,8 +247,9 @@ def get_thumbnail(filename):
 
 RESOLUTIONS = [
     {"width": 9248, "height": 6944, "label": "64MP (Max)"},
-    {"width": 8000, "height": 6000, "label": "48MP"},
+    {"width": 6912, "height": 5184, "label": "36MP (Approx)"},
     {"width": 4624, "height": 3472, "label": "16MP"},
+    {"width": 4000, "height": 3000, "label": "12MP (4:3)"},
     {"width": 3840, "height": 2160, "label": "4K UHD"},
     {"width": 2312, "height": 1736, "label": "4MP"},
     {"width": 1920, "height": 1080, "label": "1080p Full HD"},
@@ -235,6 +371,265 @@ def scheduler_worker():
             
         time.sleep(5)
 
+# --- Motion Detection Logic ---
+
+def update_motion_mask():
+    """Generates the mask image based on selected grid cells."""
+    global motion_state
+    if not motion_config['grid_mask']:
+        # If no cells selected, assume full screen (or empty? Let's assume full screen if list is empty but active is true, OR user must select cells. Let's assume user must select cells.)
+        # Actually, standard behavior: if no mask, whole screen? Let's say: if no mask, no detection.
+        motion_state['mask_image'] = np.zeros((motion_state['height'], motion_state['width']), dtype=np.uint8)
+        return
+
+    mask = np.zeros((motion_state['height'], motion_state['width']), dtype=np.uint8)
+    rows = motion_config['grid_rows']
+    cols = motion_config['grid_cols']
+    
+    cell_w = motion_state['width'] / cols
+    cell_h = motion_state['height'] / rows
+    
+    for idx in motion_config['grid_mask']:
+        r = idx // cols
+        c = idx % cols
+        x1 = int(c * cell_w)
+        y1 = int(r * cell_h)
+        x2 = int((c + 1) * cell_w)
+        y2 = int((r + 1) * cell_h)
+        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+    
+    motion_state['mask_image'] = mask
+
+# Initial load and mask generation
+load_motion_config()
+load_camera_settings()
+update_motion_mask()
+
+def detect_motion(frame_bytes):
+    """Detects motion in the given JPEG frame bytes."""
+    global motion_state
+    
+    if not motion_config['active']:
+        return False
+
+    try:
+        # Optimization: Decode to small size directly if possible, or decode and resize
+        # cv2.imdecode is generally fast enough for VGA/720p on Pi 4, but let's be safe.
+        nparr = np.frombuffer(frame_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        
+        if frame is None:
+            return False
+
+        # Resize for processing
+        resized = cv2.resize(frame, (motion_state['width'], motion_state['height']))
+        blurred = cv2.GaussianBlur(resized, (21, 21), 0)
+
+        if motion_state['previous_frame'] is None:
+            motion_state['previous_frame'] = blurred
+            return False
+
+        # Compute difference
+        frame_delta = cv2.absdiff(motion_state['previous_frame'], blurred)
+        thresh = cv2.threshold(frame_delta, motion_config['sensitivity_val'], 255, cv2.THRESH_BINARY)[1]
+        
+        # Apply mask if it exists
+        if motion_state['mask_image'] is None:
+            update_motion_mask()
+            
+        if motion_state['mask_image'] is not None:
+             thresh = cv2.bitwise_and(thresh, motion_state['mask_image'])
+
+        # Check for motion
+        # Count non-zero pixels
+        motion_pixels = cv2.countNonZero(thresh)
+        
+        motion_state['previous_frame'] = blurred
+        
+        if motion_pixels > motion_config['threshold_val']:
+            handle_motion_event(frame_bytes)
+            return True
+            
+    except Exception as e:
+        print(f"Motion detection error: {e}")
+        
+    return False
+
+def handle_motion_event(frame_bytes):
+    """Triggers configured actions on motion."""
+    now = time.time()
+    
+    # Global cooldown logic? Or just individual?
+    # Let's use individual cooldowns.
+    
+    print("Motion Detected!")
+    
+    # Triggers
+    triggers = motion_config['triggers']
+    event_type = motion_config.get('event_type', 'snap')
+    
+    # Snap Trigger
+    if event_type == 'snap':
+        if now - motion_state['last_snap'] > triggers['snap']['cooldown']:
+            motion_state['last_snap'] = now
+            req_res = triggers['snap']['resolution']
+            stream_res = {"width": camera_settings['stream_width'], "height": camera_settings['stream_height']}
+            
+            if req_res['width'] == stream_res['width'] and req_res['height'] == stream_res['height']:
+                 threading.Thread(target=trigger_snap_frame, args=(frame_bytes,)).start()
+            else:
+                 threading.Thread(target=trigger_snap_hq, args=(req_res,)).start()
+
+    # Record Trigger
+    elif event_type == 'record':
+        if now - motion_state['last_record'] > triggers['record']['cooldown']:
+            # Check if already recording?
+            if recording_process is None:
+                motion_state['last_record'] = now
+                threading.Thread(target=trigger_record, args=(triggers['record'],)).start()
+
+    # Timelapse Trigger
+    elif event_type == 'timelapse':
+        if now - motion_state['last_timelapse'] > triggers['timelapse']['cooldown']:
+             if not timelapse_status['active']:
+                 motion_state['last_timelapse'] = now
+                 threading.Thread(target=trigger_timelapse, args=(triggers['timelapse'],)).start()
+
+    # Notifications
+    if now - motion_state['last_notification'] > 10.0: # Hardcoded notification limiter
+        motion_state['last_notification'] = now
+        if motion_config['notifications']['email_enabled']:
+            threading.Thread(target=send_email_notification).start()
+            
+        if motion_config['notifications']['webhook_enabled']:
+            threading.Thread(target=send_webhook_notification).start()
+
+def trigger_snap_frame(frame_bytes):
+    try:
+        filename = f"snap_motion_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        filepath = os.path.join(CAPTURE_DIR, filename)
+        with open(filepath, 'wb') as f:
+            f.write(frame_bytes)
+        res = {"width": camera_settings["stream_width"], "height": camera_settings["stream_height"]}
+        save_metadata(filename, res, category="snapshot_motion")
+        print(f"Motion snap (frame) saved: {filename}")
+    except Exception as e:
+        print(f"Trigger snap frame failed: {e}")
+
+def trigger_snap_hq(res):
+    try:
+        # Use requests to call existing endpoint which handles locking/stream killing
+        requests.post('http://localhost:5000/snap', json={"resolution": res})
+        print(f"Motion snap (HQ) triggered: {res['label']}")
+    except Exception as e:
+        print(f"Trigger snap HQ failed: {e}")
+
+def trigger_record(settings):
+    try:
+        duration = int(settings.get('duration', 10))
+        res = settings.get('resolution', default_resolution)
+        
+        # Start recording
+        requests.post('http://localhost:5000/record/start', json={"resolution": res})
+        
+        # Wait for duration
+        time.sleep(duration)
+        
+        # Stop recording
+        requests.post('http://localhost:5000/record/stop')
+        print(f"Motion record finished ({duration}s)")
+    except Exception as e:
+        print(f"Trigger record failed: {e}")
+
+def trigger_timelapse(settings):
+    try:
+        # Use existing endpoint logic
+        payload = {
+            "resolution": settings.get('resolution', default_resolution),
+            "interval": settings.get('interval', 5),
+            "duration": settings.get('duration', 600)
+        }
+        requests.post('http://localhost:5000/timelapse/start', json=payload)
+        print("Motion timelapse started")
+    except Exception as e:
+        print(f"Trigger timelapse failed: {e}")
+
+def send_email_notification():
+    try:
+        cfg = motion_config['email_settings']
+        notif = motion_config['notifications']
+        
+        msg = MIMEMultipart()
+        msg['From'] = cfg['smtp_user']
+        msg['To'] = notif['email_to']
+        msg['Subject'] = f"PiSentry Motion Detected at {datetime.now().strftime('%H:%M:%S')}"
+        
+        body = "Motion was detected by your camera."
+        msg.attach(MIMEText(body, 'plain'))
+        
+        server = smtplib.SMTP(cfg['smtp_server'], cfg['smtp_port'])
+        server.starttls()
+        server.login(cfg['smtp_user'], cfg['smtp_pass'])
+        server.send_message(msg)
+        server.quit()
+        print("Email notification sent.")
+    except Exception as e:
+        print(f"Email error: {e}")
+
+def send_webhook_notification():
+    try:
+        url = motion_config['notifications']['webhook_url']
+        if url:
+            requests.post(url, json={"event": "motion_detected", "timestamp": datetime.now().isoformat()})
+            print("Webhook sent.")
+    except Exception as e:
+        print(f"Webhook error: {e}")
+
+@app.route('/motion/config', methods=['GET', 'POST'])
+def motion_configuration():
+    if request.method == 'POST':
+        data = request.json
+        # Full replace or merge? Let's merge key sections.
+        if 'active' in data: motion_config['active'] = data['active']
+        
+        # Sensitivity
+        if 'sensitivity_level' in data: 
+            motion_config['sensitivity_level'] = data['sensitivity_level']
+            # Map level to values
+            lvl = data['sensitivity_level']
+            if lvl == 'high':
+                motion_config['sensitivity_val'] = 15
+                motion_config['threshold_val'] = 50
+            elif lvl == 'low':
+                motion_config['sensitivity_val'] = 40
+                motion_config['threshold_val'] = 2000
+            else: # medium
+                motion_config['sensitivity_val'] = 25
+                motion_config['threshold_val'] = 500
+                
+        if 'grid_mask' in data: 
+            motion_config['grid_mask'] = data['grid_mask']
+            update_motion_mask()
+        
+        if 'event_type' in data:
+            motion_config['event_type'] = data['event_type']
+            
+        if 'triggers' in data: 
+            # Deep merge triggers
+            for key, val in data['triggers'].items():
+                if key in motion_config['triggers']:
+                    motion_config['triggers'][key].update(val)
+                    
+        if 'notifications' in data: motion_config['notifications'].update(data['notifications'])
+        if 'email_settings' in data: motion_config['email_settings'].update(data['email_settings'])
+        
+        save_motion_config()
+        return jsonify({"status": "success", "config": motion_config})
+    else:
+        return jsonify(motion_config)
+
+# --- End Motion Detection Logic ---
+
 def scheduled_record_task(task):
     global recording_process
     print(f"Starting scheduled recording: {task['id']}")
@@ -352,6 +747,9 @@ def generate_timelapse_id():
 
 @app.route('/settings/update', methods=['POST'])
 def update_settings():
+    if SURVEILLANCE_MODE:
+        return jsonify({"status": "error", "message": "Disabled in Surveillance Mode"}), 403
+    
     global camera_settings
     data = request.json
     for key in camera_settings:
@@ -363,6 +761,7 @@ def update_settings():
             else:
                 camera_settings[key] = data[key]
     
+    save_camera_settings()
     return jsonify({"status": "success", "settings": camera_settings})
 
 def get_disk_usage():
@@ -385,6 +784,7 @@ def get_camera_status():
         "recording_active": recording_process is not None,
         "streaming_active": stream_process is not None,
         "timelapse_details": timelapse_status,
+        "surveillance_mode": SURVEILLANCE_MODE,
         "storage": get_disk_usage()
     })
 
@@ -406,8 +806,27 @@ def list_videos():
         video_data.append({"filename": f, "meta": meta})
     return render_template('videos.html', files=video_data)
 
+@app.route('/video/play/<filename>')
+def play_video(filename):
+    if SURVEILLANCE_MODE:
+        return "Video playback is disabled in Surveillance Mode.", 403
+
+    if '..' in filename or filename.startswith('/'):
+        return "Invalid filename", 400
+    
+    # Check if file exists
+    filepath = os.path.join(CAPTURE_DIR, filename)
+    if not os.path.exists(filepath):
+        return "File not found", 404
+        
+    meta = get_metadata(filename)
+    return render_template('play_video.html', filename=filename, meta=meta)
+
 @app.route('/video/delete/<filename>', methods=['POST'])
 def delete_video(filename):
+    if SURVEILLANCE_MODE:
+        return jsonify({"status": "error", "message": "Disabled in Surveillance Mode"}), 403
+
     if '..' in filename or filename.startswith('/'):
         return jsonify({"status": "error", "message": "Invalid filename"}), 400
     filepath = os.path.join(CAPTURE_DIR, filename)
@@ -433,6 +852,9 @@ def list_snaps():
 
 @app.route('/snap/delete/<filename>', methods=['POST'])
 def delete_snap(filename):
+    if SURVEILLANCE_MODE:
+        return jsonify({"status": "error", "message": "Disabled in Surveillance Mode"}), 403
+
     if '..' in filename or filename.startswith('/'):
         return jsonify({"status": "error", "message": "Invalid filename"}), 400
     filepath = os.path.join(CAPTURE_DIR, filename)
@@ -613,11 +1035,14 @@ def generate_stream():
                 continue
             kill_stream()
             cmd = [
-                'rpicam-vid', '-t', '0', '--inline', '--width', str(width),
+                'rpicam-vid', '-t', '0', '--width', str(width),
                 '--height', str(height), '--codec', 'mjpeg', '--framerate', str(framerate),
                 '--rotation', str(rotation),
                 '--flush', '-n', '-o', '-'
             ]
+            # Inline headers only make sense for H.264
+            # cmd.append('--inline') 
+            
             cmd.extend(current_args)
             
             try:
@@ -652,7 +1077,19 @@ def generate_stream():
                     break
                 
                 if local_process.poll() is not None:
+                    # Capture stderr for debugging
+                    try:
+                        err = local_process.stderr.read()
+                        if err: print(f"rpicam-vid error: {err.decode(errors='ignore')}")
+                    except: pass
                     break
+
+                # Read stderr to prevent buffer blocking
+                try:
+                    err_chunk = local_process.stderr.read(4096)
+                    # Optionally log warnings? for now just drain the buffer
+                except BlockingIOError:
+                    pass
 
                 try:
                     chunk = local_process.stdout.read(32768) # Larger buffer for high-res MJPEG
@@ -689,6 +1126,32 @@ def generate_stream():
                     jpg = buffer[a:b+2]
                     buffer = buffer[b+2:]
                     last_frame_time = time.time()
+                    
+                    # Motion Detection Integration
+                    if motion_config['active']:
+                        now = time.time()
+                        # Rate limit checks to avoid CPU saturation
+                        if now - motion_state.get('last_check', 0) > 0.2: 
+                            if not motion_state.get('is_processing', False):
+                                try:
+                                    motion_state['last_check'] = now
+                                    # Copy bytes to ensure thread safety (bytes are immutable but just in case)
+                                    frame_data = jpg
+                                    
+                                    def run_detection(data):
+                                        motion_state['is_processing'] = True
+                                        try:
+                                            detect_motion(data)
+                                        except Exception as e:
+                                            print(f"Motion detection thread error: {e}")
+                                        finally:
+                                            motion_state['is_processing'] = False
+
+                                    threading.Thread(target=run_detection, args=(frame_data,), daemon=True).start()
+                                except Exception as e:
+                                    print(f"Motion dispatch error: {e}")
+                            # Else: skip frame, detection is still running
+
                     yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + jpg + b'\r\n')
         except Exception as e:
             print(f"Stream generation error: {e}")
@@ -701,6 +1164,9 @@ def generate_stream():
 
 @app.route('/snap', methods=['POST'])
 def snap():
+    if SURVEILLANCE_MODE:
+        return jsonify({"status": "error", "message": "Disabled in Surveillance Mode"}), 403
+
     with camera_lock:
         stop_stream.set()
         kill_stream() # Release camera
@@ -738,6 +1204,9 @@ def snap():
 
 @app.route('/record/start', methods=['POST'])
 def start_record():
+    if SURVEILLANCE_MODE:
+        return jsonify({"status": "error", "message": "Disabled in Surveillance Mode"}), 403
+
     global recording_process
     with camera_lock:
         if recording_process:
@@ -944,6 +1413,9 @@ def timelapse_worker(interval, duration, res, session_id, task=None):
 
 @app.route('/timelapse/start', methods=['POST'])
 def start_timelapse():
+    if SURVEILLANCE_MODE:
+        return jsonify({"status": "error", "message": "Disabled in Surveillance Mode"}), 403
+
     global timelapse_thread
     if timelapse_thread and timelapse_thread.is_alive():
         return jsonify({"status": "error", "message": "Timelapse already running"})

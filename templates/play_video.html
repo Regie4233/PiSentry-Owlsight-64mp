@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}Play {{ filename }} - PiSentry{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <a href="/gallery/videos" class="btn btn-outline-secondary mb-3">
+            <i class="fas fa-arrow-left me-1"></i> Back to Gallery
+        </a>
+        <h2 class="fw-bold mb-1">
+            <i class="fas fa-play-circle me-2 text-primary"></i>{{ filename }}
+        </h2>
+        {% if meta %}
+        <p class="text-muted">
+            recorded at {{ meta.timestamp }} • {{ meta.resolution }} • {{ meta.size_human }}
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="row justify-content-center">
+    <div class="col-lg-10">
+        <div class="card border-0 shadow-lg overflow-hidden">
+            <div class="card-body p-0 bg-black text-center">
+                {% if filename.endswith('.h264') %}
+                <div class="alert alert-warning m-4">
+                    <h4 class="alert-heading"><i class="fas fa-exclamation-triangle"></i> Format Warning</h4>
+                    <p>This video is in raw H.264 format, which may not play in all browsers.</p>
+                    <hr>
+                    <p class="mb-0">For best compatibility, please download the file or record in MP4 format.</p>
+                </div>
+                {% endif %}
+                
+                <video id="videoPlayer" controls autoplay class="w-100" style="max-height: 80vh;">
+                    <source src="/static/captures/{{ filename }}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <div class="card-footer bg-white p-3">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <button class="btn btn-primary" onclick="document.getElementById('videoPlayer').play()">
+                            <i class="fas fa-play"></i> Play
+                        </button>
+                        <button class="btn btn-secondary" onclick="document.getElementById('videoPlayer').pause()">
+                            <i class="fas fa-pause"></i> Pause
+                        </button>
+                    </div>
+                    <div>
+                        <a href="/static/captures/{{ filename }}" download class="btn btn-outline-primary">
+                            <i class="fas fa-download me-1"></i> Download
+                        </a>
+                        <button onclick="deleteVideo('{{ filename }}')" class="btn btn-outline-danger">
+                            <i class="fas fa-trash me-1"></i> Delete
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    async function deleteVideo(filename) {
+        if (!confirm('Permanently delete this video?')) return;
+        try {
+            const res = await fetch(`/video/delete/${filename}`, { method: 'POST' });
+            if (res.ok) window.location.href = '/gallery/videos';
+            else alert('Error deleting video');
+        } catch (e) { alert('Error communicating with server'); }
+    }
+</script>
+{% endblock %}
